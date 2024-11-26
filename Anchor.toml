@@ -17,3 +17,6 @@ wallet = "./keypairs/deployer.json"
 [scripts]
 test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"
 initialize = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 migrations/initialize.ts"
+expand_bitmap = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 migrations/expand_bitmap.ts"
+spl_create_fund_mint = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 migrations/spl_create_fund_mint.ts"
+spl_approve = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 migrations/spl_approve.ts"

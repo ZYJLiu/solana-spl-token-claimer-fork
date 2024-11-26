@@ -24,17 +24,20 @@ import * as fs from "fs";
 
   console.log(`Claim Signer: ${claimSignerKeypair.publicKey.toBase58()}`);
 
-  // Send the initialize transaction
-  const tx = await program.methods
-    .initialize(claimSignerKeypair.publicKey) // Pass the claim signer public key
-    .accounts({
-      state: stateKeypair.publicKey, // State account
-      owner: provider.wallet.publicKey, // Wallet signing the transaction
-      systemProgram: anchor.web3.SystemProgram.programId, // Solana System Program
-    })
-    .signers([stateKeypair]) // The state account must sign the transaction
-    .rpc();
-
-  console.log(`Transaction Signature: ${tx}`);
-  console.log("Account successfully initialized.");
+  try {
+    const tx = await program.methods
+      .initialize(claimSignerKeypair.publicKey) // Pass the claim signer public key
+      .accounts({
+        state: stateKeypair.publicKey, // State account
+        owner: provider.wallet.publicKey, // Wallet signing the transaction
+        systemProgram: anchor.web3.SystemProgram.programId, // Solana System Program
+      })
+      .signers([stateKeypair]) // The state account must sign the transaction
+      .rpc();
+    console.log(`Transaction Signature: ${tx}`);
+    console.log("Account successfully initialized.");
+  } catch (err) {
+    console.error("Transaction failed:", err.message);
+    console.error("Full Error:", err);
+  }
 })();
