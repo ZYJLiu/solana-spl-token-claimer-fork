@@ -206,7 +206,6 @@ describe("token_claimer", () => {
     // Generate a mock signature for the claim
     const message = Buffer.concat([
       claimIndex.toArrayLike(Buffer, "be", 8),
-      claimer.publicKey.toBuffer(),
       sourceTokenAccount.toBuffer(),
       expectedDestinationTokenAccount.toBuffer(), 
       amount.toArrayLike(Buffer, "be", 8),
@@ -270,7 +269,7 @@ describe("token_claimer", () => {
       //   mint,
       //   destination.publicKey
       // );
-      const ed25519InstructionIndex = new anchor.BN(1);
+      const ed25519InstructionIndex = new anchor.BN(0);
       await program.methods
         .claim(ed25519InstructionIndex, claimIndex, amount, signature)
         .accounts({
@@ -281,17 +280,18 @@ describe("token_claimer", () => {
           ixSysvar: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
         })
         .preInstructions([
+          anchor.web3.Ed25519Program.createInstructionWithPublicKey({
+            publicKey: claimSigner.publicKey.toBytes(),
+            message: message,
+            signature: signature,
+          }),
           createAssociatedTokenAccountIdempotentInstruction(
             claimer.publicKey,
             expectedDestinationTokenAccount,
             destination.publicKey, 
             mint 
           ),
-          anchor.web3.Ed25519Program.createInstructionWithPublicKey({
-            publicKey: claimSigner.publicKey.toBytes(),
-            message: message,
-            signature: signature,
-          })
+          
         ])
         .signers([claimer])
         .rpc();

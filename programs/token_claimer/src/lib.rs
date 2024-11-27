@@ -128,9 +128,8 @@ pub mod token_claimer {
         );
 
         // Construct the message for hashing.
-        let mut message = Vec::with_capacity(8 + 32 + 32 + 32 + 8);
+        let mut message = Vec::with_capacity(8 + 32 + 32 + 8);
         message.extend_from_slice(&claim_index.to_be_bytes()); // 8 bytes.
-        message.extend_from_slice(&ctx.accounts.claimer.key().to_bytes()); // 32 bytes.
         message.extend_from_slice(&ctx.accounts.source_token_account.key().to_bytes()); // 32 bytes.
         message.extend_from_slice(&ctx.accounts.destination_token_account.key().to_bytes()); // 32 bytes.
         message.extend_from_slice(&amount.to_be_bytes()); // 8 bytes.
