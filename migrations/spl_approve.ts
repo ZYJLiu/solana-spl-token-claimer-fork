@@ -26,7 +26,7 @@ const loadPublicKey = (path) => {
   const ownerKeypair = loadKeyPair("keypairs/deployer.json");
   const stateKeypair = loadKeyPair("keypairs/state_account.json");
 
-  console.log("Owner account:", ownerKeypair.publicKey.toBase58());
+  console.log("Owner (deployer) account:", ownerKeypair.publicKey.toBase58());
   console.log("State account:", stateKeypair.publicKey.toBase58());
 
   const sourceTokenAccount = loadPublicKey("keypairs/spl_token_for_deployer.json");
