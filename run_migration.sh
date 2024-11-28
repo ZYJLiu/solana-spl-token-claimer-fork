@@ -5,8 +5,8 @@ if [ -z "$1" ]; then
   exit 1
 fi
 
-echo "Argument: $1"
+s="${1%.ts}"
 cp "Anchor.toml" "Anchor.toml.bak";
-echo -e "\n$1 = \"yarn run ts-mocha -p ./tsconfig.json -t 1000000 migrations/$1.ts\"" >> "Anchor.toml"
-anchor run $1;
+echo -e "\n$s = \"yarn run ts-mocha -p ./tsconfig.json -t 1000000 migrations/$s.ts\"" >> "Anchor.toml"
+anchor run $s;
 mv "Anchor.toml.bak" "Anchor.toml";
