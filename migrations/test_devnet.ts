@@ -50,10 +50,10 @@ const loadPublicKey = (path) => {
   console.log("State Accoount:", stateAccount.publicKey.toBase58());
   console.log("Mint Authority:", mintAuthority.publicKey.toBase58());
   console.log("Deployer:", deployer.publicKey.toBase58());
-  console.log("Claim Signer:", claimSigner.publicKey.toBase58());
+  console.log("Claim Signer:", claimSigner.publicKey.toBase58()); // On the server side.
   console.log("SPL Token Mint:", splTokenMint.toBase58());
   console.log("Source Token Account:", sourceTokenAccount.toBase58());
-  console.log("Claimer:", claimer.publicKey.toBase58());
+  console.log("Claimer:", claimer.publicKey.toBase58()); // This is the user who will claim the tokens.
   console.log("Destination:", destination.publicKey.toBase58());
   
   try {
@@ -68,10 +68,6 @@ const loadPublicKey = (path) => {
     destination.publicKey
   );
   console.log("Expected Destination Token Account:", expectedDestinationTokenAccount.toBase58());
-
-  const genSig = (claimIndex, amount) => {
-    
-  };
 
   // Make sure you bump the claim index, cuz I might have already claimed some.
   const claims = [

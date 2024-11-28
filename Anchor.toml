@@ -17,11 +17,3 @@ wallet = "./keypairs/deployer.json"
 
 [scripts]
 test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"
-initialize = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 migrations/initialize.ts"
-expand_bitmap = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 migrations/expand_bitmap.ts"
-spl_create_fund_mint = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 migrations/spl_create_fund_mint.ts"
-spl_approve = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 migrations/spl_approve.ts"
-print_public_keys = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 migrations/print_public_keys.ts"
-test_devnet = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 migrations/test_devnet.ts"
-test_devnet_with_serialize = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 migrations/test_devnet_with_serialize.ts"
-
