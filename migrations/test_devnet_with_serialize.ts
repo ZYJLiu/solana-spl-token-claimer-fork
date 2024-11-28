@@ -8,6 +8,9 @@ import {
   Transaction,
   SystemProgram,
   sendAndConfirmTransaction,
+  TransactionMessage,
+  VersionedMessage,
+  VersionedTransaction,
 } from "@solana/web3.js";
 import * as splToken from "@solana/spl-token";
 import * as fs from "fs";
@@ -124,11 +127,36 @@ const loadPublicKey = (path) => {
 
   console.log("Program Owner:", state.owner.toBase58());
   console.log("Program Claim Signer:", state.claimSigner.toBase58());
-
+  
+  const latestBlockhash = await provider.connection.getLatestBlockhash(
+    "confirmed"
+  );
+  // Create message
+  const messageV0 = new TransactionMessage({
+    payerKey: claimer.publicKey,
+    recentBlockhash: latestBlockhash.blockhash,
+    instructions: instructions,
+  }).compileToV0Message();
+  console.log("Message V0:", messageV0);
+  const serializedMessage = Buffer.from(messageV0.serialize()).toString(
+    "base64"
+  );
+  console.log("Serialized Message:", serializedMessage);
+  const deserializedMessage = VersionedMessage.deserialize(
+    Buffer.from(serializedMessage, "base64")
+  );
+  const newTransaction = new VersionedTransaction(deserializedMessage);
+  newTransaction.sign([claimer]);
   try {
-    const transaction = new Transaction();
-    instructions.forEach((instruction) => transaction.add(instruction));
-    const txId = await sendAndConfirmTransaction(connection, transaction, [claimer]);
+    const signature1 = await provider.connection.sendRawTransaction(
+      newTransaction.serialize(),
+      {
+        skipPreflight: false,
+        maxRetries: 3,
+        preflightCommitment: "confirmed",
+      }
+    );
+    const txId = await provider.connection.confirmTransaction(signature1, "confirmed");
     console.log("Transaction ID:", txId);
   } catch (err) {
     console.error(err);
