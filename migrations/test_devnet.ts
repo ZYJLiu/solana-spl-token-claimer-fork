@@ -69,48 +69,67 @@ const loadPublicKey = (path) => {
   );
   console.log("Expected Destination Token Account:", expectedDestinationTokenAccount.toBase58());
 
-  const claimIndex = new anchor.BN(100);
-  const amount = new anchor.BN(123);
+  const genSig = (claimIndex, amount) => {
+    
+  };
 
-  const message = Buffer.concat([
-    claimIndex.toArrayLike(Buffer, "be", 4),
-    sourceTokenAccount.toBuffer(),
-    expectedDestinationTokenAccount.toBuffer(), 
-    amount.toArrayLike(Buffer, "be", 8),
-  ]);
-  console.log("Message:", message.length, message.toString("hex"));
-  const signature = nacl.sign.detached(message, claimSigner.secretKey);
-  console.log("Signature:", Buffer.from(signature).toString("hex"));
+  // Make sure you bump the claim index, cuz I might have already claimed some.
+  const claims = [
+    {
+      claimIndex: 103,
+      amount: 123,
+    },
+    {
+      claimIndex: 104,
+      amount: 456,
+    },
+  ];
+  
+  let instructions = []; 
+  
+  for (let i = 0; i < claims.length; i++) {
+    const { claimIndex, amount } = claims[i];
+    const message = Buffer.concat([
+      (new anchor.BN(claimIndex)).toArrayLike(Buffer, "be", 4),
+      sourceTokenAccount.toBuffer(),
+      expectedDestinationTokenAccount.toBuffer(), 
+      (new anchor.BN(amount)).toArrayLike(Buffer, "be", 8),
+    ]);
+    const signature = nacl.sign.detached(message, claimSigner.secretKey);
+    instructions.push(
+      anchor.web3.Ed25519Program.createInstructionWithPublicKey({
+        publicKey: claimSigner.publicKey.toBytes(),
+        message: message,
+        signature: signature,
+      }),
+      splToken.createAssociatedTokenAccountIdempotentInstruction(
+        claimer.publicKey,
+        expectedDestinationTokenAccount,
+        destination.publicKey, 
+        splTokenMint 
+      ),
+      await program.methods
+        .claim(i * 3, claimIndex, new anchor.BN(amount), Array.from(signature))
+        .accounts({
+          state: stateAccount.publicKey,
+          claimer: claimer.publicKey,
+          sourceTokenAccount: sourceTokenAccount,
+          destinationTokenAccount: expectedDestinationTokenAccount,
+          ixSysvar: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
+        }).instruction()
+    );
+  }
+
+  console.log("Instructions:", instructions);
 
   console.log("Program Owner:", state.owner.toBase58());
   console.log("Program Claim Signer:", state.claimSigner.toBase58());
 
   try {
-    const ed25519InstructionIndex = new anchor.BN(0);
-    const tx = await program.methods
-      .claim(ed25519InstructionIndex, claimIndex, amount, signature)
-      .accounts({
-        state: stateAccount.publicKey,
-        claimer: claimer.publicKey,
-        sourceTokenAccount: sourceTokenAccount,
-        destinationTokenAccount: expectedDestinationTokenAccount,
-        ixSysvar: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
-      })
-      .preInstructions([
-        anchor.web3.Ed25519Program.createInstructionWithPublicKey({
-          publicKey: claimSigner.publicKey.toBytes(),
-          message: message,
-          signature: signature,
-        }),
-        splToken.createAssociatedTokenAccountIdempotentInstruction(
-          claimer.publicKey,
-          expectedDestinationTokenAccount,
-          destination.publicKey, 
-          splTokenMint 
-        ),
-      ])
-      .signers([claimer])
-      .rpc();
+    const transaction = new Transaction();
+    instructions.forEach((instruction) => transaction.add(instruction));
+    const txId = await sendAndConfirmTransaction(connection, transaction, [claimer]);
+    console.log("Transaction ID:", txId);
   } catch (err) {
     console.error(err);
     if (err.transactionLogs) {
