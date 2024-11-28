@@ -13,6 +13,23 @@ const CLAIM_SIGNER_OFFSET: usize = OWNER_OFFSET + 32; // Skip 32 bytes.
 const BITMAP_LEN_OFFSET: usize = CLAIM_SIGNER_OFFSET + 32; // Skip claim signer.
 const INITIAL_STATE_BYTE_LEN: usize = BITMAP_LEN_OFFSET + 128;
 
+macro_rules! only_owner {
+    ($ctx:expr) => {
+        require!(
+            $ctx.accounts.owner.key()
+                == Pubkey::new_from_array(
+                    $ctx.accounts.state
+                        .to_account_info()
+                        .data
+                        .borrow()[OWNER_OFFSET..OWNER_OFFSET + 32]
+                        .try_into()
+                        .unwrap()
+                ),
+            CustomError::Unauthorized
+        );
+    };
+}
+
 #[program]
 pub mod token_claimer {
     use super::*;
@@ -29,17 +46,7 @@ pub mod token_claimer {
     /// Expands the bitmap by 10_000 bytes (80_000 bits).
     pub fn expand_bitmap(ctx: Context<ExpandBitmap>) -> Result<()> {
         let state_info = &ctx.accounts.state;
-
-        // Check if the caller is the owner
-        require!(
-            ctx.accounts.owner.key()
-                == Pubkey::new_from_array(
-                    state_info.data.borrow()[OWNER_OFFSET..OWNER_OFFSET + 32]
-                        .try_into()
-                        .unwrap()
-                ),
-            CustomError::Unauthorized
-        );
+        only_owner!(ctx);
 
         let current_bitmap_len = u32::from_le_bytes(
             state_info.data.borrow()[BITMAP_LEN_OFFSET..BITMAP_LEN_OFFSET + 4]
@@ -68,14 +75,16 @@ pub mod token_claimer {
         ctx: Context<SetClaimSigner>,
         new_claim_signer: Pubkey,
     ) -> Result<()> {
-        // Owner check.
-        require!(
-            ctx.accounts.owner.key() == ctx.accounts.state.owner,
-            CustomError::Unauthorized
-        );
+        let state_info = &ctx.accounts.state;
+        only_owner!(ctx);
         // Update the state.
-        let previous_claim_signer = ctx.accounts.state.claim_signer;
-        ctx.accounts.state.claim_signer = new_claim_signer;
+        let previous_claim_signer = Pubkey::new_from_array(
+            state_info.data.borrow()[CLAIM_SIGNER_OFFSET..CLAIM_SIGNER_OFFSET + 32]
+                .try_into()
+                .unwrap()
+        );
+        state_info.data.borrow_mut()[CLAIM_SIGNER_OFFSET..CLAIM_SIGNER_OFFSET + 32]
+            .copy_from_slice(&new_claim_signer.to_bytes());
         // Emit the event.
         emit!(ClaimSignerUpdated {
             previous_claim_signer: previous_claim_signer,
@@ -86,14 +95,16 @@ pub mod token_claimer {
 
     /// Transfer ownership of the program.
     pub fn transfer_ownership(ctx: Context<TransferOwnership>, new_owner: Pubkey) -> Result<()> {
-        // Owner check.
-        require!(
-            ctx.accounts.owner.key() == ctx.accounts.state.owner,
-            CustomError::Unauthorized
-        );
+        let state_info = &ctx.accounts.state;
+        only_owner!(ctx);
         // Update the state.
-        let previous_owner = ctx.accounts.state.owner;
-        ctx.accounts.state.owner = new_owner;
+        let previous_owner = Pubkey::new_from_array(
+            state_info.data.borrow()[OWNER_OFFSET..OWNER_OFFSET + 32]
+                .try_into()
+                .unwrap()
+        );
+        state_info.data.borrow_mut()[OWNER_OFFSET..OWNER_OFFSET + 32]
+            .copy_from_slice(&new_owner.to_bytes());
         // Emit the event.
         emit!(OwnershipTransferred {
             previous_owner: previous_owner,
@@ -106,39 +117,50 @@ pub mod token_claimer {
     pub fn claim(
         ctx: Context<Claim>,
         ed25519_instruction_index: u32,
-        claim_index: u64,
+        claim_index: u32,
         amount: u64,
         signature: [u8; 64]
     ) -> Result<()> {
+        let state_info = &ctx.accounts.state;
+
         let solana_account_info: SolanaAccountInfo = ctx.accounts.ix_sysvar.to_account_info();
         let ix: Instruction = load_instruction_at_checked(ed25519_instruction_index.try_into().unwrap(), &solana_account_info)
             .map_err(|_| CustomError::InvalidSignature)?;
 
         // Check if the claim index has already been processed.
-        let byte_index = (claim_index >> 3) as usize; // Division by 8 (bit shift).
+        let byte_index = claim_index >> 3; // Division by 8 (bit shift).
         let bit_index = (claim_index & 7) as u8; // Modulo 8 (bit mask).
+        let current_bitmap_len = u32::from_le_bytes(
+            state_info.data.borrow()[BITMAP_LEN_OFFSET..BITMAP_LEN_OFFSET + 4]
+                .try_into()
+                .unwrap(),
+        );
         require!(
-            byte_index < ctx.accounts.state.claimed_bitmap.len(),
+            byte_index < current_bitmap_len,
             CustomError::InvalidClaimIndex
         );
         let bit_mask = 1 << bit_index;
+        let state_byte_index = BITMAP_LEN_OFFSET + 4 + byte_index as usize;
         require!(
-            ctx.accounts.state.claimed_bitmap[byte_index] & bit_mask == 0,
+            state_info.data.borrow()[state_byte_index] & bit_mask == 0,
             CustomError::AlreadyClaimed
         );
 
         // Construct the message for hashing.
-        let mut message = Vec::with_capacity(8 + 32 + 32 + 8);
-        message.extend_from_slice(&claim_index.to_be_bytes()); // 8 bytes.
+        let mut message = Vec::with_capacity(4 + 32 + 32 + 8);
+        message.extend_from_slice(&claim_index.to_be_bytes()); // 4 bytes.
         message.extend_from_slice(&ctx.accounts.source_token_account.key().to_bytes()); // 32 bytes.
         message.extend_from_slice(&ctx.accounts.destination_token_account.key().to_bytes()); // 32 bytes.
         message.extend_from_slice(&amount.to_be_bytes()); // 8 bytes.
 
-        let public_key_bytes = ctx.accounts.state.claim_signer.to_bytes();
-        require!(utils::verify_ed25519_ix(&ix, &public_key_bytes, &message, &signature), CustomError::InvalidSignature);
-
+        {
+            let state_data = state_info.data.borrow();
+            let public_key_bytes = &state_data[CLAIM_SIGNER_OFFSET..CLAIM_SIGNER_OFFSET + 32];
+            require!(utils::verify_ed25519_ix(&ix, &public_key_bytes, &message, &signature), CustomError::InvalidSignature);
+        }
+        
         // Mark the claim as processed.
-        ctx.accounts.state.claimed_bitmap[byte_index] |= bit_mask;
+        state_info.data.borrow_mut()[state_byte_index] |= bit_mask;
 
         // Transfer the tokens.
         // Ensure there are enough tokens in the source account.
@@ -181,46 +203,6 @@ pub mod token_claimer {
         Ok(())
     }
 
-    /// Withdraw SPL tokens from the program's token account (only callable by the owner).
-    pub fn withdraw(ctx: Context<Withdraw>, amount: u64) -> Result<()> {
-        // Owner check.
-        require!(
-            ctx.accounts.owner.key() == ctx.accounts.state.owner,
-            CustomError::Unauthorized
-        );
-        // Ensure there are enough tokens in the source account.
-        require!(
-            ctx.accounts.source_token_account.amount >= amount,
-            CustomError::InsufficientFunds
-        );
-        // Ensure the token program is correct.
-        require!(
-            ctx.accounts.token_program.key() == anchor_spl::token::ID,
-            CustomError::InvalidTokenProgram
-        );
-        let binding = ctx.accounts.source_token_account.key();
-        let seeds = &[
-            b"delegate", 
-            binding.as_ref(), 
-            &[ctx.bumps.delegate],
-        ];
-        let signer = &[&seeds[..]];
-        // Perform the token transfer.
-        let cpi_ctx = CpiContext::new_with_signer(
-            ctx.accounts.token_program.to_account_info(),
-            Transfer {
-                from: ctx.accounts.source_token_account.to_account_info(),
-                to: ctx.accounts.destination_token_account.to_account_info(),
-                authority: ctx.accounts.delegate.to_account_info(),
-            },
-            signer,
-        );
-        token::transfer(cpi_ctx, amount)?;
-
-        Ok(())
-    }
-
-
     pub fn approve_delegate(ctx: Context<ApproveDelegate>, amount: u64) -> Result<()> {
         let cpi_accounts = Approve {
             to: ctx.accounts.token_account.to_account_info(),
@@ -249,7 +231,7 @@ pub struct Initialize<'info> {
 #[derive(Accounts)]
 pub struct ExpandBitmap<'info> {
     #[account(mut)]
-    /// CHECK: make sure state is properly resized.
+    /// CHECK: We'll rawdog the state.
     pub state: AccountInfo<'info>,
     pub owner: Signer<'info>,
     pub system_program: Program<'info, System>,
@@ -272,21 +254,24 @@ pub struct ApproveDelegate<'info> {
 #[derive(Accounts)]
 pub struct SetClaimSigner<'info> {
     #[account(mut)]
-    pub state: Account<'info, State>,
+    /// CHECK: We'll rawdog the state.
+    pub state: AccountInfo<'info>,
     pub owner: Signer<'info>, // `msg.sender`.
 }
 
 #[derive(Accounts)]
 pub struct TransferOwnership<'info> {
     #[account(mut)]
-    pub state: Account<'info, State>,
+    /// CHECK: We'll rawdog the state.
+    pub state: AccountInfo<'info>,
     pub owner: Signer<'info>, // `msg.sender`.
 }
 
 #[derive(Accounts)]
 pub struct Claim<'info> {
     #[account(mut)]
-    pub state: Account<'info, State>,
+    /// CHECK: We'll rawdog the state.
+    pub state: AccountInfo<'info>,
     #[account(mut)]
     pub source_token_account: Account<'info, TokenAccount>,
     #[account(mut)]
@@ -306,24 +291,6 @@ pub struct Claim<'info> {
     /// in the Anchor framework yet, so this is the safe approach.
     #[account(address = IX_ID)]
     pub ix_sysvar: AccountInfo<'info>,
-}
-
-#[derive(Accounts)]
-pub struct Withdraw<'info> {
-    #[account(mut)]
-    pub state: Account<'info, State>, 
-    #[account(mut)]
-    pub source_token_account: Account<'info, TokenAccount>, 
-    #[account(mut)]
-    pub destination_token_account: Account<'info, TokenAccount>,
-    #[account(
-        seeds = [b"delegate", source_token_account.key().as_ref()],
-        bump
-    )]
-    /// CHECK: The PDA delegated to transfer tokens.
-    pub delegate: AccountInfo<'info>,
-    pub owner: Signer<'info>, // Program owner
-    pub token_program: Program<'info, Token>, // SPL token program
 }
 
 #[account]
@@ -360,7 +327,7 @@ pub enum CustomError {
 #[event]
 pub struct ClaimProcessed {
     pub claimer: Pubkey,
-    pub claim_index: u64,
+    pub claim_index: u32,
     pub amount: u64,
 }
 

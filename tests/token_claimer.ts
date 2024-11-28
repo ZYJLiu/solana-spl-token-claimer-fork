@@ -205,7 +205,7 @@ describe("token_claimer", () => {
     const claimIndex = new anchor.BN(1);
     // Generate a mock signature for the claim
     const message = Buffer.concat([
-      claimIndex.toArrayLike(Buffer, "be", 8),
+      claimIndex.toArrayLike(Buffer, "be", 4),
       sourceTokenAccount.toBuffer(),
       expectedDestinationTokenAccount.toBuffer(), 
       amount.toArrayLike(Buffer, "be", 8),
