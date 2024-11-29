@@ -1,6 +1,5 @@
 use anchor_lang::prelude::*;
 use anchor_lang::solana_program::account_info::AccountInfo as SolanaAccountInfo;
-use anchor_lang::solana_program::instruction::Instruction;
 use anchor_lang::solana_program::sysvar::instructions::{load_instruction_at_checked, ID as IX_ID};
 use anchor_spl::token::{self, Approve, Revoke, Token, TokenAccount, Transfer};
 
@@ -125,11 +124,33 @@ pub mod token_claimer {
         signature: [u8; 64],
     ) -> Result<()> {
         let solana_account_info: SolanaAccountInfo = ctx.accounts.ix_sysvar.to_account_info();
-        let ix: Instruction = load_instruction_at_checked(
-            ed25519_instruction_index.try_into().unwrap(),
-            &solana_account_info,
-        )
-        .map_err(|_| CustomError::InstructionLoadFailed)?;
+        let mut has_valid_signature = false;
+        let message = [
+            claim_index.to_be_bytes().as_slice(),
+            ctx.accounts.source_token_account.key().as_ref(),
+            ctx.accounts.destination_token_account.key().as_ref(),
+            amount.to_be_bytes().as_slice(),
+        ]
+        .concat();
+        for i in 0..4 {
+            let result = load_instruction_at_checked(
+                ed25519_instruction_index.saturating_add(i).try_into().unwrap(),
+                &solana_account_info,
+            );
+            if let Ok(ix) = result {
+                if utils::verify_ed25519_ix(
+                    &ix,
+                    &state_pubkey_slice!(ctx, CLAIM_SIGNER_OFFSET),
+                    &message,
+                    &signature
+                ) {
+                    has_valid_signature = true;
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
 
         // Check if the claim index has already been processed.
         let byte_index = claim_index >> 3; // Division by 8 (bit shift).
@@ -145,18 +166,7 @@ pub mod token_claimer {
         );
 
         require!(
-            utils::verify_ed25519_ix(
-                &ix,
-                &state_pubkey_slice!(ctx, CLAIM_SIGNER_OFFSET),
-                &[
-                    claim_index.to_be_bytes().as_slice(),
-                    ctx.accounts.source_token_account.key().as_ref(),
-                    ctx.accounts.destination_token_account.key().as_ref(),
-                    amount.to_be_bytes().as_slice(),
-                ]
-                .concat(),
-                &signature
-            ),
+            has_valid_signature,
             CustomError::InvalidSignature
         );
 
