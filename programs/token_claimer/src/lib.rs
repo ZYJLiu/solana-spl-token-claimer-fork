@@ -1,5 +1,4 @@
 use anchor_lang::prelude::*;
-use anchor_lang::solana_program::account_info::AccountInfo as SolanaAccountInfo;
 use anchor_lang::solana_program::sysvar::instructions::{load_instruction_at_checked, ID as IX_ID};
 use anchor_spl::token::{self, Approve, Revoke, Token, TokenAccount, Transfer};
 
@@ -17,12 +16,6 @@ const INITIAL_STATE_BYTE_LEN: usize = BITMAP_BYTES_OFFSET + 128;
 macro_rules! state_slice {
     ($ctx:expr, $start:expr, $n:expr) => {
         $ctx.accounts.state.data.borrow_mut()[$start..$start + $n]
-    };
-}
-
-macro_rules! state_claim_bitmap_byte {
-    ($ctx:expr, $i:expr) => {
-        $ctx.accounts.state.data.borrow_mut()[BITMAP_BYTES_OFFSET + $i as usize]
     };
 }
 
@@ -50,6 +43,12 @@ macro_rules! only_owner {
 macro_rules! state_bitmap_len {
     ($ctx:expr) => {
         u32::from_le_bytes(state_slice!($ctx, BITMAP_LEN_OFFSET, 4).try_into().unwrap())
+    };
+}
+
+macro_rules! state_claim_bitmap_byte {
+    ($ctx:expr, $i:expr) => {
+        $ctx.accounts.state.data.borrow_mut()[BITMAP_BYTES_OFFSET + $i as usize]
     };
 }
 
@@ -94,24 +93,30 @@ pub mod token_claimer {
     /// Update the claim signer (only callable by the program owner).
     pub fn set_claim_signer(ctx: Context<SetClaimSigner>, new_claim_signer: Pubkey) -> Result<()> {
         only_owner!(ctx);
+
         let previous_claim_signer = state_pubkey!(ctx, CLAIM_SIGNER_OFFSET);
         state_copy_from_bytes!(ctx, CLAIM_SIGNER_OFFSET, &new_claim_signer.to_bytes());
+
         emit!(ClaimSignerUpdated {
             previous_claim_signer: previous_claim_signer,
             new_claim_signer: new_claim_signer,
         });
+
         Ok(())
     }
 
     /// Transfer ownership of the program.
     pub fn transfer_ownership(ctx: Context<TransferOwnership>, new_owner: Pubkey) -> Result<()> {
         only_owner!(ctx);
+
         let previous_owner = state_pubkey!(ctx, OWNER_OFFSET);
         state_copy_from_bytes!(ctx, OWNER_OFFSET, &new_owner.to_bytes());
+
         emit!(OwnershipTransferred {
             previous_owner: previous_owner,
             new_owner,
         });
+
         Ok(())
     }
 
@@ -123,8 +128,7 @@ pub mod token_claimer {
         amount: u64,
         signature: [u8; 64],
     ) -> Result<()> {
-        let solana_account_info: SolanaAccountInfo = ctx.accounts.ix_sysvar.to_account_info();
-        let mut has_valid_signature = false;
+        let solana_account_info = ctx.accounts.ix_sysvar.to_account_info();
         let message = [
             claim_index.to_be_bytes().as_slice(),
             ctx.accounts.source_token_account.key().as_ref(),
@@ -132,48 +136,40 @@ pub mod token_claimer {
             amount.to_be_bytes().as_slice(),
         ]
         .concat();
-        for i in 0..4 {
-            let result = load_instruction_at_checked(
-                ed25519_instruction_index.saturating_add(i).try_into().unwrap(),
+        let has_valid_signature = (0..4).any(|i| {
+            load_instruction_at_checked(
+                ed25519_instruction_index
+                    .saturating_add(i)
+                    .try_into()
+                    .unwrap(),
                 &solana_account_info,
-            );
-            if let Ok(ix) = result {
-                if utils::verify_ed25519_ix(
+            )
+            .ok()
+            .map_or(false, |ix| {
+                utils::verify_ed25519_ix(
                     &ix,
                     &state_pubkey_slice!(ctx, CLAIM_SIGNER_OFFSET),
                     &message,
-                    &signature
-                ) {
-                    has_valid_signature = true;
-                    break;
-                }
-            } else {
-                break;
-            }
-        }
+                    &signature,
+                )
+            })
+        });
+        require!(has_valid_signature, CustomError::InvalidSignature);
 
         // Check if the claim index has already been processed.
         let byte_index = claim_index >> 3; // Division by 8 (bit shift).
-        let bit_index = (claim_index & 7) as u8; // Modulo 8 (bit mask).
+        let bit_mask = 1 << ((claim_index & 7) as u8); // Modulo 8 (bit mask).
         require!(
             byte_index < state_bitmap_len!(ctx),
             CustomError::InvalidClaimIndex
         );
-        let bit_mask = 1 << bit_index;
         require!(
             state_claim_bitmap_byte!(ctx, byte_index) & bit_mask == 0,
             CustomError::AlreadyClaimed
         );
-
-        require!(
-            has_valid_signature,
-            CustomError::InvalidSignature
-        );
-
         // Mark the claim as processed.
         state_claim_bitmap_byte!(ctx, byte_index) |= bit_mask;
 
-        // Transfer the tokens.
         // Ensure there are enough tokens in the source account.
         require!(
             ctx.accounts.source_token_account.amount >= amount,
@@ -184,11 +180,10 @@ pub mod token_claimer {
             ctx.accounts.token_program.key() == anchor_spl::token::ID,
             CustomError::InvalidTokenProgram
         );
-        // Perform the token transfer.
+        // Transfer the tokens.
         let binding = ctx.accounts.source_token_account.key();
         let seeds = &[b"delegate", binding.as_ref(), &[ctx.bumps.delegate]];
         let signer = &[&seeds[..]];
-        // Perform the token transfer.
         let cpi_ctx = CpiContext::new_with_signer(
             ctx.accounts.token_program.to_account_info(),
             Transfer {
@@ -200,7 +195,6 @@ pub mod token_claimer {
         );
         token::transfer(cpi_ctx, amount)?;
 
-        // Emit the claim event.
         emit!(ClaimProcessed {
             claimer: ctx.accounts.claimer.key(),
             claim_index,
@@ -210,19 +204,22 @@ pub mod token_claimer {
         Ok(())
     }
 
+    /// Unset a claim index.
     pub fn unset_claim_index(ctx: Context<UnsetClaimIndex>, claim_index: u32) -> Result<()> {
         only_owner!(ctx);
+
         let byte_index = claim_index >> 3; // Division by 8 (bit shift).
-        let bit_index = (claim_index & 7) as u8; // Modulo 8 (bit mask).
+        let bit_mask = 1 << ((claim_index & 7) as u8); // Modulo 8 (bit mask).
         require!(
             byte_index < state_bitmap_len!(ctx),
             CustomError::InvalidClaimIndex
         );
-        let bit_mask = 1 << bit_index;
         state_claim_bitmap_byte!(ctx, byte_index) &= !bit_mask;
+
         Ok(())
     }
 
+    /// Approve the program's PDA to transfer tokens.
     pub fn approve_delegate(ctx: Context<ApproveDelegate>, amount: u64) -> Result<()> {
         let cpi_accounts = Approve {
             to: ctx.accounts.token_account.to_account_info(),
@@ -238,6 +235,7 @@ pub mod token_claimer {
         Ok(())
     }
 
+    /// Revoke the program's PDA's ability to transfer tokens.
     pub fn revoke_delegate(ctx: Context<RevokeDelegate>) -> Result<()> {
         let cpi_accounts = Revoke {
             source: ctx.accounts.token_account.to_account_info(),

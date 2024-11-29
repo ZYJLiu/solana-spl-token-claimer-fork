@@ -52,7 +52,7 @@ const loadPublicKey = (path) => {
   const splTokenMint = loadPublicKey("keypairs/spl_token.json");
   const sourceTokenAccount = loadPublicKey("keypairs/spl_token_for_deployer.json");
   const claimer = Keypair.fromSecretKey(
-    bs58.decode("<INSERT_CLAIMER_SECRET_KEY>")
+    bs58.decode("3mPCSBwGhPJCTwsui1JfXWfLo9gVqg2DmVEpMwxqJN1uaL9dDQ1X2esoWwSV62KephpkhKoxv3eVYXagyk1Jo2Eo")
   );
   const destination = claimer;// loadKeypair("keypairs/destination.json");
 
@@ -83,12 +83,16 @@ const loadPublicKey = (path) => {
   // Make sure you bump the claim index, cuz I might have already claimed some.
   const claims = [
     {
-      claimIndex: 1230,
-      amount: 123,
+      claimIndex: 1267,
+      amount: 2,
     },
     {
-      claimIndex: 1229,
-      amount: 456,
+      claimIndex: 1268,
+      amount: 2,
+    },
+    {
+      claimIndex: 1269,
+      amount: 2,
     },
   ];
   
