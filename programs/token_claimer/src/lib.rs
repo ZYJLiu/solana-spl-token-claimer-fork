@@ -369,8 +369,6 @@ pub enum CustomError {
     AlreadyClaimed,
     #[msg("Invalid signature")]
     InvalidSignature,
-    #[msg("Instruction load failed")]
-    InstructionLoadFailed,
     #[msg("Invalid token program")]
     InvalidTokenProgram,
     #[msg("Insufficient funds")]
