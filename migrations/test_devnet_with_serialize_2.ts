@@ -93,6 +93,13 @@ const loadPublicKey = (path) => {
     totalAmount += amount;
     claimIndices.push(claimIndex);
   }
+  const clockAccountInfo = await provider.connection.getAccountInfo(
+    anchor.web3.SYSVAR_CLOCK_PUBKEY
+  );
+  const currentTimestamp = new anchor.BN(
+    clockAccountInfo.data.readBigInt64LE(8)
+  ).toNumber();
+  const expiry = currentTimestamp + 60;
   const message = keccak_256(Buffer.concat([
     keccak_256(Buffer.concat(
       claimIndices.map(i => (new anchor.BN(i)).toArrayLike(Buffer, "le", 4))
@@ -101,6 +108,7 @@ const loadPublicKey = (path) => {
     sourceTokenAccount.toBuffer(),
     expectedDestinationTokenAccount.toBuffer(), 
     (new anchor.BN(totalAmount)).toArrayLike(Buffer, "le", 8),
+    (new anchor.BN(expiry)).toArrayLike(Buffer, "le", 4),
   ]));
   const signature = nacl.sign.detached(message, claimSigner.secretKey);
   instructions.push(
@@ -116,7 +124,7 @@ const loadPublicKey = (path) => {
       signature: signature,
     }),
     await program.methods
-      .claim(claimIndices, new anchor.BN(totalAmount))
+      .claim(claimIndices, new anchor.BN(totalAmount), expiry)
       .accounts({
         state: stateAccount.publicKey,
         claimer: claimer.publicKey,

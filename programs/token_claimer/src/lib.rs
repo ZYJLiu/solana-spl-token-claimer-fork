@@ -2,6 +2,7 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program::keccak;
 use anchor_lang::solana_program::sysvar::instructions::{load_instruction_at_checked, ID as IX_ID};
 use anchor_spl::token::{self, Approve, Revoke, Token, TokenAccount, Transfer};
+use anchor_lang::solana_program::sysvar::clock::Clock;
 
 pub mod utils;
 
@@ -123,7 +124,9 @@ pub mod token_claimer {
     }
 
     /// Process a claim for tokens with a valid signature.
-    pub fn claim(ctx: Context<Claim>, claim_indices: Vec<u32>, total_amount: u64) -> Result<()> {
+    pub fn claim(ctx: Context<Claim>, claim_indices: Vec<u32>, total_amount: u64, expiry: u32) -> Result<()> {
+        let clock = Clock::get()?;
+        require!(clock.unix_timestamp < expiry.into(), CustomError::ClaimExpired);
         let solana_account_info = ctx.accounts.ix_sysvar.to_account_info();
         let message = keccak::hashv(&[
             keccak::hash(
@@ -137,6 +140,7 @@ pub mod token_claimer {
             ctx.accounts.source_token_account.key().as_ref(),
             ctx.accounts.destination_token_account.key().as_ref(),
             total_amount.to_le_bytes().as_slice(),
+            expiry.to_le_bytes().as_slice(),
         ])
         .0;
         let mut has_valid_signature = false;
@@ -366,6 +370,8 @@ pub enum CustomError {
     AlreadyClaimed,
     #[msg("Invalid signature")]
     InvalidSignature,
+    #[msg("Claim expired")]
+    ClaimExpired,
     #[msg("Invalid token program")]
     InvalidTokenProgram,
     #[msg("Insufficient funds")]
