@@ -3,10 +3,10 @@ use anchor_lang::solana_program::instruction::Instruction;
 
 /// Verify Ed25519Program instruction fields
 pub fn verify_ed25519_ix(ix: &Instruction, pubkey: &[u8], msg: &[u8]) -> bool {
-    return ix.program_id == ED25519_ID && // The program id we expect.
-        ix.accounts.len() == 0 && // With no context accounts.
+    ix.program_id == ED25519_ID && // The program id we expect.
+        ix.accounts.is_empty() && // With no context accounts.
         ix.data.len() == (16 + 64 + 32 + msg.len()) && // With the correct data size.
-        check_ed25519_data(&ix.data, pubkey, msg);
+        check_ed25519_data(&ix.data, pubkey, msg)
 }
 
 /// Verify serialized Ed25519Program instruction data
@@ -42,15 +42,15 @@ pub fn check_ed25519_data(data: &[u8], pubkey: &[u8], msg: &[u8]) -> bool {
     // Header
     if num_signatures != &exp_num_signatures.to_le_bytes()
         || padding != &[0]
-        || signature_offset != &exp_signature_offset.to_le_bytes()
-        || signature_instruction_index != &u16::MAX.to_le_bytes()
-        || public_key_offset != &exp_public_key_offset.to_le_bytes()
-        || public_key_instruction_index != &u16::MAX.to_le_bytes()
-        || message_data_offset != &exp_message_data_offset.to_le_bytes()
-        || message_data_size != &exp_message_data_size.to_le_bytes()
-        || message_instruction_index != &u16::MAX.to_le_bytes()
+        || signature_offset != exp_signature_offset.to_le_bytes()
+        || signature_instruction_index != u16::MAX.to_le_bytes()
+        || public_key_offset != exp_public_key_offset.to_le_bytes()
+        || public_key_instruction_index != u16::MAX.to_le_bytes()
+        || message_data_offset != exp_message_data_offset.to_le_bytes()
+        || message_data_size != exp_message_data_size.to_le_bytes()
+        || message_instruction_index != u16::MAX.to_le_bytes()
     {
         return false;
     }
-    return data_pubkey == pubkey && data_msg == msg;
+    data_pubkey == pubkey && data_msg == msg
 }

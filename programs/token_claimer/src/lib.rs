@@ -2,37 +2,31 @@ use anchor_lang::prelude::*;
 use anchor_lang::solana_program::keccak;
 use anchor_lang::solana_program::sysvar::clock::Clock;
 use anchor_lang::solana_program::sysvar::instructions::{load_instruction_at_checked, ID as IX_ID};
-use anchor_spl::token::{self, Approve, Revoke, Token, TokenAccount, Transfer};
-
+use anchor_spl::{
+    associated_token::AssociatedToken,
+    token_interface::{self, Mint, TokenAccount, TokenInterface, TransferChecked, CloseAccount},
+};
 pub mod utils;
 
-declare_id!("DfmArRxQL4usBuAv4QFA7PVhXf3c1KLremcoDDww9DG4");
+declare_id!("HTVUaceNryrFRPGdWpsNZEya2qujTEi6xJbAoBVfVVs1");
 
-// Remember to update this if you use a different state account.
-const STATE_ACCOUNT: anchor_lang::prelude::Pubkey =
-    pubkey!("66W2xL9W892CSZ1141My2jZN31oEU4dd6eQfzidWCPw");
 // March 9 2025 11:59 pm, update on deployment.
 const END_TIME: u32 = 1741564799;
 
 const DISCIMINATOR_LEN: usize = 8;
-const OWNER_OFFSET: usize = DISCIMINATOR_LEN; // Skip discriminator (8 bytes).
+const BUMP_SEED_OFFSET: usize = DISCIMINATOR_LEN; // Skip discriminator (8 bytes).
+const OWNER_OFFSET: usize = BUMP_SEED_OFFSET + 1; // Skip bump seed (1 byte).
 const CLAIM_SIGNER_OFFSET: usize = OWNER_OFFSET + 32; // Skip 32 bytes.
 const BITMAP_LEN_OFFSET: usize = CLAIM_SIGNER_OFFSET + 32; // Skip claim signer.
 const BITMAP_BYTES_OFFSET: usize = BITMAP_LEN_OFFSET + 4; // Skip bitmap length.
 const INITIAL_STATE_BYTE_LEN: usize = BITMAP_BYTES_OFFSET + 128;
+const EXTEND_BITMAP_BYTES_LEN: usize = 1000;
+
+const STATE_SEED: &[u8] = b"state";
 
 macro_rules! state_slice {
     ($ctx:expr, $start:expr, $n:expr) => {
         $ctx.accounts.state.data.borrow_mut()[$start..$start + $n]
-    };
-}
-
-macro_rules! check_state {
-    ($ctx:expr) => {
-        require!(
-            STATE_ACCOUNT == $ctx.accounts.state.key(),
-            CustomError::Unauthorized
-        );
     };
 }
 
@@ -57,24 +51,11 @@ macro_rules! only_owner {
     };
 }
 
-macro_rules! state_bitmap_len {
-    ($ctx:expr) => {
-        u32::from_le_bytes(state_slice!($ctx, BITMAP_LEN_OFFSET, 4).try_into().unwrap())
-    };
-}
-
 macro_rules! state_claim_bitmap_byte {
     ($ctx:expr, $i:expr) => {
         // The program will panic if the state account doesn't have enough space.
         $ctx.accounts.state.data.borrow_mut()[BITMAP_BYTES_OFFSET + $i as usize]
     };
-}
-
-macro_rules! state_copy_from_bytes {
-    ($ctx:expr, $start:expr, $source:expr) => {{
-        let len = $source.len();
-        state_slice!($ctx, $start, len).copy_from_slice($source);
-    }};
 }
 
 #[program]
@@ -83,59 +64,46 @@ pub mod token_claimer {
 
     /// Initialize the program state.
     pub fn initialize(ctx: Context<Initialize>, claim_signer: Pubkey) -> Result<()> {
-        check_state!(ctx);
-        let state = &mut ctx.accounts.state;
-        state.owner = ctx.accounts.owner.key();
-        state.claim_signer = claim_signer;
-        state.claimed_bitmap = Vec::new();
+        *ctx.accounts.state = State {
+            bump: ctx.bumps.state,
+            owner: ctx.accounts.owner.key(),
+            claim_signer,
+            claimed_bitmap: Vec::new(),
+        };
         Ok(())
     }
 
-    /// Expands the bitmap by 10_000 bytes (80_000 bits).
+    /// Expands the bitmap Vec by 1000 bytes, resize limited due to use of realloc constraint.
+    /// The realloc constraint automatically handles SOL transfer, but takes space on the instruction.
+    /// Increasing EXTEND_BITMAP_BYTES_LEN above ~1500 causes following error:
+    /// Error: memory allocation failed, out of memory
     pub fn expand_bitmap(ctx: Context<ExpandBitmap>) -> Result<()> {
-        check_state!(ctx);
-        only_owner!(ctx);
-
-        let current_bitmap_len: u32 = state_bitmap_len!(ctx);
-        let new_bitmap_len: u32 = current_bitmap_len.saturating_add(10_000);
-        let new_account_size = BITMAP_BYTES_OFFSET + new_bitmap_len as usize;
-
-        let state_info = &ctx.accounts.state;
-        if new_account_size > state_info.data_len() {
-            state_info.realloc(new_account_size, false)?;
-        }
-
-        state_copy_from_bytes!(ctx, BITMAP_LEN_OFFSET, &new_bitmap_len.to_le_bytes());
-
+        let state = &mut ctx.accounts.state;
+        let current_len = state.claimed_bitmap.len();
+        state.claimed_bitmap.resize(current_len + EXTEND_BITMAP_BYTES_LEN, 0);
         Ok(())
     }
 
-    /// Update the claim signer (only callable by the program owner).
+    /// Update the claim signer (only callable by the address specfied in owner field in account state).
     pub fn set_claim_signer(ctx: Context<SetClaimSigner>, new_claim_signer: Pubkey) -> Result<()> {
-        check_state!(ctx);
-        only_owner!(ctx);
-
-        let previous_claim_signer = state_pubkey!(ctx, CLAIM_SIGNER_OFFSET);
-        state_copy_from_bytes!(ctx, CLAIM_SIGNER_OFFSET, &new_claim_signer.to_bytes());
+        let previous_claim_signer = ctx.accounts.state.claim_signer;
+        ctx.accounts.state.claim_signer = new_claim_signer;
 
         emit!(ClaimSignerUpdated {
-            previous_claim_signer: previous_claim_signer,
-            new_claim_signer: new_claim_signer,
+            previous_claim_signer,
+            new_claim_signer,
         });
 
         Ok(())
     }
 
-    /// Transfer ownership of the program.
+    /// Transfer "owner" of state account.
     pub fn transfer_ownership(ctx: Context<TransferOwnership>, new_owner: Pubkey) -> Result<()> {
-        check_state!(ctx);
-        only_owner!(ctx);
-
-        let previous_owner = state_pubkey!(ctx, OWNER_OFFSET);
-        state_copy_from_bytes!(ctx, OWNER_OFFSET, &new_owner.to_bytes());
+        let previous_owner = ctx.accounts.state.owner;
+        ctx.accounts.state.owner = new_owner;
 
         emit!(OwnershipTransferred {
-            previous_owner: previous_owner,
+            previous_owner,
             new_owner,
         });
 
@@ -143,18 +111,20 @@ pub mod token_claimer {
     }
 
     /// Process a claim for tokens with a valid signature.
+    /// This requires an additional instruction message signed by the "claim signer" address.
     pub fn claim(
         ctx: Context<Claim>,
         claim_indices: Vec<u32>,
         total_amount: u64,
         expiry: u32,
     ) -> Result<()> {
-        check_state!(ctx);
         require!(
             Clock::get()?.unix_timestamp < expiry.into() && expiry <= END_TIME,
             CustomError::ClaimExpired
         );
         let solana_account_info = ctx.accounts.ix_sysvar.to_account_info();
+
+        // recreate the message to verify against "claim signer" signature
         let message = keccak::hashv(&[
             keccak::hash(
                 &claim_indices
@@ -170,21 +140,20 @@ pub mod token_claimer {
             expiry.to_le_bytes().as_slice(),
         ])
         .0;
+        
+        // Check instructions in the transaction to find/verify the signature by "claim signer"
+        let mut i = 0;
         let mut has_valid_signature = false;
-        for i in 0..64 {
-            if let Ok(ix) = load_instruction_at_checked(i, &solana_account_info) {
-                // Verify the Ed25519 signature for the instruction
-                if utils::verify_ed25519_ix(
-                    &ix,
-                    &state_pubkey_slice!(ctx, CLAIM_SIGNER_OFFSET),
-                    &message,
-                ) {
-                    has_valid_signature = true;
-                    break;
-                }
-            } else {
-                break; // Stop iterating if no more instructions are available.
+        while let Ok(ix) = load_instruction_at_checked(i, &solana_account_info) {
+            if utils::verify_ed25519_ix(
+                &ix,
+                &state_pubkey_slice!(ctx, CLAIM_SIGNER_OFFSET),
+                &message,
+            ) {
+                has_valid_signature = true;
+                break;
             }
+            i += 1;
         }
         require!(has_valid_signature, CustomError::InvalidSignature);
 
@@ -205,30 +174,23 @@ pub mod token_claimer {
             ctx.accounts.source_token_account.amount >= total_amount,
             CustomError::InsufficientFunds
         );
-        // Ensure the token program is correct.
-        require!(
-            ctx.accounts.token_program.key() == anchor_spl::token::ID,
-            CustomError::InvalidTokenProgram
-        );
-        // Transfer the tokens.
-        let binding = ctx.accounts.source_token_account.key();
-        let seeds = &[
-            b"delegate",
-            binding.as_ref(),
-            STATE_ACCOUNT.as_ref(),
-            &[ctx.bumps.delegate],
-        ];
-        let signer = &[&seeds[..]];
-        let cpi_ctx = CpiContext::new_with_signer(
+
+        // Transfer tokens from program owned token account to destination token account.
+        let decimals = ctx.accounts.mint.decimals;
+        let mint_address = ctx.accounts.mint.key();
+        let signer_seeds: &[&[&[u8]]] = &[&[mint_address.as_ref(), &[ctx.bumps.source_token_account]]];
+
+        let cpi_ctx = CpiContext::new(
             ctx.accounts.token_program.to_account_info(),
-            Transfer {
+            TransferChecked {
                 from: ctx.accounts.source_token_account.to_account_info(),
                 to: ctx.accounts.destination_token_account.to_account_info(),
-                authority: ctx.accounts.delegate.to_account_info(),
+                mint: ctx.accounts.mint.to_account_info(),
+                authority: ctx.accounts.source_token_account.to_account_info(),
             },
-            signer,
-        );
-        token::transfer(cpi_ctx, total_amount)?;
+        )
+        .with_signer(signer_seeds);
+        token_interface::transfer_checked(cpi_ctx, total_amount, decimals)?;
 
         emit!(ClaimProcessed {
             claimer: ctx.accounts.claimer.key(),
@@ -244,7 +206,6 @@ pub mod token_claimer {
         ctx: Context<UnsetClaimIndex>,
         claim_indices: Vec<u32>,
     ) -> Result<()> {
-        check_state!(ctx);
         only_owner!(ctx);
 
         for claim_index in claim_indices.iter() {
@@ -256,33 +217,42 @@ pub mod token_claimer {
         Ok(())
     }
 
-    /// Approve the program's PDA to transfer tokens.
-    pub fn approve_delegate(ctx: Context<ApproveDelegate>, amount: u64) -> Result<()> {
-        let cpi_accounts = Approve {
-            to: ctx.accounts.token_account.to_account_info(),
-            delegate: ctx.accounts.delegate.to_account_info(),
-            authority: ctx.accounts.authority.to_account_info(),
-        };
-
-        let cpi_program = ctx.accounts.token_program.to_account_info();
-        let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
-
-        token::approve(cpi_ctx, amount)?;
-
+    /// Create a token account for the program to hold tokens.
+    pub fn create_token_account(_ctx: Context<CreateTokenAccount>) -> Result<()> {
         Ok(())
     }
 
-    /// Revoke the program's PDA's ability to transfer tokens.
-    pub fn revoke_delegate(ctx: Context<RevokeDelegate>) -> Result<()> {
-        let cpi_accounts = Revoke {
-            source: ctx.accounts.token_account.to_account_info(),
-            authority: ctx.accounts.authority.to_account_info(),
-        };
+    /// Transfer remaining tokens from program owned token account to the "owner" of the state account.
+    /// Then close the program owned token account.
+    pub fn close_token_account(ctx: Context<CloseTokenAccount>) -> Result<()> {
+        let amount = ctx.accounts.program_token_account.amount;
+        let decimals = ctx.accounts.mint.decimals;
+        let mint_address = ctx.accounts.mint.key();
+        let signer_seeds: &[&[&[u8]]] = &[&[mint_address.as_ref(), &[ctx.bumps.program_token_account]]];
 
-        let cpi_program = ctx.accounts.token_program.to_account_info();
-        let cpi_ctx = CpiContext::new(cpi_program, cpi_accounts);
+        // Withdraw all tokens from program owned token account
+        let cpi_ctx = CpiContext::new(
+            ctx.accounts.token_program.to_account_info(),
+            TransferChecked {
+                from: ctx.accounts.program_token_account.to_account_info(),
+                to: ctx.accounts.destination_token_account.to_account_info(),
+                mint: ctx.accounts.mint.to_account_info(),
+                authority: ctx.accounts.program_token_account.to_account_info(),
+            },
+        )
+        .with_signer(signer_seeds);
+        token_interface::transfer_checked(cpi_ctx, amount, decimals)?;
 
-        token::revoke(cpi_ctx)?;
+        // Close the program owned token account (now with 0 balance)
+        let cpi_ctx = CpiContext::new(
+            ctx.accounts.token_program.to_account_info(),
+            CloseAccount {  
+                account: ctx.accounts.program_token_account.to_account_info(),
+                destination: ctx.accounts.owner.to_account_info(),
+                authority: ctx.accounts.program_token_account.to_account_info(),
+            },
+        ).with_signer(signer_seeds);
+        token_interface::close_account(cpi_ctx)?;
 
         Ok(())
     }
@@ -290,63 +260,62 @@ pub mod token_claimer {
 
 #[derive(Accounts)]
 pub struct Initialize<'info> {
-    #[account(init, payer = owner, space = DISCIMINATOR_LEN + State::LEN)]
-    pub state: Account<'info, State>,
     #[account(mut)]
     pub owner: Signer<'info>,
+    // Use a PDA as the address of the state account.
+    #[account(
+        init, 
+        payer = owner, 
+        space = DISCIMINATOR_LEN + State::LEN,
+        seeds = [STATE_SEED],
+        bump
+    )]
+    pub state: Account<'info, State>,
     pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]
 pub struct ExpandBitmap<'info> {
-    /// CHECK: We'll rawdog the state.
     #[account(mut)]
-    pub state: AccountInfo<'info>,
     pub owner: Signer<'info>,
+    #[account(
+        mut,
+        seeds = [STATE_SEED],
+        // use the bump seed stored in the state account
+        bump = state.bump,
+        // check the "owner" field in the state account matches the owner account above
+        has_one = owner, 
+        // realloc to increase the size (bytes)of the state account
+        realloc = state.expand_bitmap_len(),
+        // owner account pays for the realloc (SOL)
+        realloc::payer = owner,
+        realloc::zero = false,
+    )]
+    pub state: Account<'info, State>,
     pub system_program: Program<'info, System>,
 }
 
 #[derive(Accounts)]
-pub struct ApproveDelegate<'info> {
-    #[account(mut)]
-    pub token_account: Account<'info, TokenAccount>, // Source SPL token account
-    /// CHECK: The PDA delegated to transfer tokens.
-    #[account(
-        seeds = [b"delegate", token_account.key().as_ref(), STATE_ACCOUNT.as_ref()],
-        bump
-    )]
-    pub delegate: AccountInfo<'info>,
-    pub authority: Signer<'info>,
-    pub token_program: Program<'info, Token>,
-}
-
-#[derive(Accounts)]
-pub struct RevokeDelegate<'info> {
-    #[account(mut)]
-    pub token_account: Account<'info, TokenAccount>, // Source SPL token account
-    /// CHECK: The PDA delegated to transfer tokens.
-    #[account(
-        seeds = [b"delegate", token_account.key().as_ref(), STATE_ACCOUNT.as_ref()],
-        bump
-    )]
-    pub delegate: AccountInfo<'info>,
-    pub authority: Signer<'info>,
-    pub token_program: Program<'info, Token>,
-}
-
-#[derive(Accounts)]
 pub struct SetClaimSigner<'info> {
-    /// CHECK: We'll rawdog the state.
-    #[account(mut)]
-    pub state: AccountInfo<'info>,
     pub owner: Signer<'info>,
+    #[account(
+        mut,
+        seeds = [STATE_SEED],
+        bump = state.bump,
+        has_one = owner,
+    )]
+    pub state: Account<'info, State>,
 }
 
 #[derive(Accounts)]
 pub struct TransferOwnership<'info> {
-    /// CHECK: We'll rawdog the state.
-    #[account(mut)]
-    pub state: AccountInfo<'info>,
+    #[account(
+        mut,
+        seeds = [STATE_SEED],
+        bump = state.bump,
+        has_one = owner,
+    )]
+    pub state: Account<'info, State>,
     pub owner: Signer<'info>,
 }
 
@@ -360,22 +329,44 @@ pub struct UnsetClaimIndex<'info> {
 
 #[derive(Accounts)]
 pub struct Claim<'info> {
+    #[account(mut)]
+    pub claimer: Signer<'info>,
     /// CHECK: We'll rawdog the state.
-    #[account(mut)]
-    pub state: AccountInfo<'info>,
-    #[account(mut)]
-    pub source_token_account: Account<'info, TokenAccount>,
-    /// CHECK: The destination account for the tokens.
-    #[account(mut)]
-    pub destination_token_account: AccountInfo<'info>,
-    /// CHECK: The PDA delegated to transfer tokens.
     #[account(
-        seeds = [b"delegate", source_token_account.key().as_ref(), STATE_ACCOUNT.as_ref()],
+        mut,
+        seeds = [STATE_SEED],
         bump
     )]
-    pub delegate: AccountInfo<'info>,
-    pub claimer: Signer<'info>,
-    pub token_program: Program<'info, Token>,
+    pub state: AccountInfo<'info>,
+
+    // InterfaceAccount type allows Mint from both Token Program and Token 2022 Program
+    #[account(mut)]
+    pub mint: InterfaceAccount<'info, Mint>,
+
+    // InterfaceAccount type allows TokenAccount from both Token Program and Token 2022 Program
+    // This is a program owned token account
+    #[account(
+        mut,    
+        seeds = [mint.key().as_ref()],
+        bump
+    )]
+    pub source_token_account: InterfaceAccount<'info, TokenAccount>,
+
+    #[account(
+        // create the ATA for claimer if it doesn't exist
+        init_if_needed,
+        // claimer pays the SOL to create the ATA
+        payer = claimer,
+        associated_token::mint = mint,
+        associated_token::authority = claimer,
+        associated_token::token_program = token_program,
+    )]
+    pub destination_token_account: InterfaceAccount<'info, TokenAccount>,
+
+    // Interface type allows for both Token Program and Token 2022 Program
+    pub token_program: Interface<'info, TokenInterface>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
+    pub system_program: Program<'info, System>,
     /// CHECK: The address check is needed because otherwise
     /// the supplied Sysvar could be anything else.
     /// The Instruction Sysvar has not been implemented
@@ -384,8 +375,69 @@ pub struct Claim<'info> {
     pub ix_sysvar: AccountInfo<'info>,
 }
 
+#[derive(Accounts)]
+pub struct CreateTokenAccount<'info> {
+    #[account(mut)]
+    pub payer: Signer<'info>,
+    #[account(
+        // create program owned token account if it doesn't exist
+        init_if_needed,
+        payer = payer,
+        // derive the address using the mint address as seed
+        seeds = [mint.key().as_ref()],
+        bump,
+        token::mint = mint,
+        // use the PDA as both the address of the token account and the authority (owner)
+        // using a PDA as the authority allows the program to "sign" for the token account
+        token::authority = program_token_account,
+        token::token_program = token_program,
+
+    )]
+    pub program_token_account: InterfaceAccount<'info, TokenAccount>,
+    #[account(mut)]
+    pub mint: InterfaceAccount<'info, Mint>,
+    pub token_program: Interface<'info, TokenInterface>,
+    pub system_program: Program<'info, System>,
+}
+
+#[derive(Accounts)]
+pub struct CloseTokenAccount<'info> {
+    #[account(mut)]
+    pub owner: Signer<'info>,
+    #[account(
+        seeds = [STATE_SEED],
+        bump = state.bump,
+        has_one = owner,
+    )]
+    pub state: Account<'info, State>,
+    #[account(
+        mut,
+        seeds = [mint.key().as_ref()],
+        bump,
+        token::mint = mint,
+        token::authority = program_token_account,
+        token::token_program = token_program,
+
+    )]
+    pub program_token_account: InterfaceAccount<'info, TokenAccount>,
+    #[account(
+        init_if_needed,
+        payer = owner,
+        associated_token::mint = mint,
+        associated_token::authority = owner,
+        associated_token::token_program = token_program,
+    )]
+    pub destination_token_account: InterfaceAccount<'info, TokenAccount>,
+    #[account(mut)]
+    pub mint: InterfaceAccount<'info, Mint>,
+    pub token_program: Interface<'info, TokenInterface>,
+    pub associated_token_program: Program<'info, AssociatedToken>,
+    pub system_program: Program<'info, System>,
+}
+
 #[account]
 pub struct State {
+    pub bump: u8,                // Bump seed to derive the account PDA, saves on Compute Unit.
     pub owner: Pubkey,           // Program owner's public key.
     pub claim_signer: Pubkey,    // Public key of the claim signer.
     pub claimed_bitmap: Vec<u8>, // Fixed-size bitmap for tracking claimed indices.
@@ -393,6 +445,10 @@ pub struct State {
 
 impl State {
     pub const LEN: usize = INITIAL_STATE_BYTE_LEN;
+
+    pub fn expand_bitmap_len(&self) -> usize {
+        BITMAP_BYTES_OFFSET + self.claimed_bitmap.len() + EXTEND_BITMAP_BYTES_LEN
+    }
 }
 
 #[error_code]

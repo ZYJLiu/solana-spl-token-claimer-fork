@@ -5,15 +5,14 @@ resolution = true
 skip-lint = false
 
 [programs.localnet]
-token_claimer = "DfmArRxQL4usBuAv4QFA7PVhXf3c1KLremcoDDww9DG4"
+token_claimer = "HTVUaceNryrFRPGdWpsNZEya2qujTEi6xJbAoBVfVVs1"
 
 [registry]
 url = "https://api.apr.dev"
 
 [provider]
-# cluster = "https://api.devnet.solana.com"
-cluster = "localnet"
-wallet = "./keypairs/deployer.json"
+cluster = "Localnet"
+wallet = "~/.config/solana/id.json"
 
 [scripts]
 test = "yarn run ts-mocha -p ./tsconfig.json -t 1000000 tests/**/*.ts"
