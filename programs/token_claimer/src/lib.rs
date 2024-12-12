@@ -83,6 +83,7 @@ pub mod token_claimer {
 
     /// Initialize the program state.
     pub fn initialize(ctx: Context<Initialize>, claim_signer: Pubkey) -> Result<()> {
+        check_state!(ctx);
         let state = &mut ctx.accounts.state;
         state.owner = ctx.accounts.owner.key();
         state.claim_signer = claim_signer;
