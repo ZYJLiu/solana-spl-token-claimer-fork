@@ -212,7 +212,12 @@ pub mod token_claimer {
         );
         // Transfer the tokens.
         let binding = ctx.accounts.source_token_account.key();
-        let seeds = &[b"delegate", binding.as_ref(), &[ctx.bumps.delegate]];
+        let seeds = &[
+            b"delegate",
+            binding.as_ref(),
+            STATE_ACCOUNT.as_ref(),
+            &[ctx.bumps.delegate],
+        ];
         let signer = &[&seeds[..]];
         let cpi_ctx = CpiContext::new_with_signer(
             ctx.accounts.token_program.to_account_info(),
@@ -307,7 +312,7 @@ pub struct ApproveDelegate<'info> {
     pub token_account: Account<'info, TokenAccount>, // Source SPL token account
     /// CHECK: The PDA delegated to transfer tokens.
     #[account(
-        seeds = [b"delegate", token_account.key().as_ref()],
+        seeds = [b"delegate", token_account.key().as_ref(), STATE_ACCOUNT.as_ref()],
         bump
     )]
     pub delegate: AccountInfo<'info>,
@@ -321,7 +326,7 @@ pub struct RevokeDelegate<'info> {
     pub token_account: Account<'info, TokenAccount>, // Source SPL token account
     /// CHECK: The PDA delegated to transfer tokens.
     #[account(
-        seeds = [b"delegate", token_account.key().as_ref()],
+        seeds = [b"delegate", token_account.key().as_ref(), STATE_ACCOUNT.as_ref()],
         bump
     )]
     pub delegate: AccountInfo<'info>,
@@ -365,7 +370,7 @@ pub struct Claim<'info> {
     pub destination_token_account: AccountInfo<'info>,
     /// CHECK: The PDA delegated to transfer tokens.
     #[account(
-        seeds = [b"delegate", source_token_account.key().as_ref()],
+        seeds = [b"delegate", source_token_account.key().as_ref(), STATE_ACCOUNT.as_ref()],
         bump
     )]
     pub delegate: AccountInfo<'info>,

@@ -300,7 +300,7 @@ describe("token_claimer", () => {
     );
     
     [delegatePDA, delegateBump] = await anchor.web3.PublicKey.findProgramAddress(
-      [Buffer.from("delegate"), sourceTokenAccount.toBuffer()],
+      [Buffer.from("delegate"), sourceTokenAccount.toBuffer(), stateAccount.publicKey.toBuffer()],
       program.programId
     );
 
